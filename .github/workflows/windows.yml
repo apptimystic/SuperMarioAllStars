@@ -1,0 +1,30 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S . -B build
+
+      - name: Build Release
+        run: cmake --build build --config Release --target SuperMarioAllStars
+
+      - name: Copy Font License
+        run: |
+          if (Test-Path third_party/fonts/LICENSE.txt) {
+            Copy-Item third_party/fonts/LICENSE.txt build/Release/LuckiestGuy-LICENSE.txt
+          }
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SuperMarioAllStars-Windows-x64
+          path: build/Release/*
