@@ -86,6 +86,8 @@ public:
   // Per-OBJ-palette color overrides (character color variants).
   uint8_t objPalOverrideMask = 0;
   uint16_t objPalOverride[8][16] = {};
+  // Optional 0x2000-word override for OBJ VRAM ($6000..$7FFF, SMB3 NES sprites).
+  const uint16_t* objVramOverride = nullptr;
   // Per-sprite colours (SMB1 co-op's Luigi): OAM entries set here (reset each
   // line) take objAltColors instead of their palette.
   uint64_t objAltMask[2] = {};

@@ -614,7 +614,9 @@ bool Smb3Engine::coopExec() {
       }
     }
   }
-  if (wvar(0x0238)) {
+  if (nesSprites_ && hasNesRom_) {
+    buildNesPlayerTiles(p2_[vix(0x00BB)], p2_[vix(0x00BC)], p2Tiles_);
+  } else if (wvar(0x0238)) {
     // (his pose's tiles to stream: six 64-byte blocks from bank $0238 to VRAM $6000, see $20:F650)
     const uint32_t bank = wvar(0x0238);
     for (int k = 0; k < 6; k++) {
@@ -1013,11 +1015,14 @@ void Smb3Engine::coopTakeOver() {
     p2X_[k] = (int16_t)(px - cam + off);
     p2OamHi_[k] = (uint8_t)((p2OamHi_[k] & ~1) | (p2X_[k] >> 8 & 1));
   }
-  if (const uint32_t bank = p2_[vix(0x0238)])
+  if (nesSprites_ && hasNesRom_) {
+    buildNesPlayerTiles(p2_[vix(0x00BB)], p2_[vix(0x00BC)], p2Tiles_);
+  } else if (const uint32_t bank = p2_[vix(0x0238)]) {
     for (int k = 0; k < 6; k++) {
       const uint32_t src = bank << 16 | p2_[vix(0x0220 + 2 * k)] | p2_[vix(0x0221 + 2 * k)] << 8;
       for (int i = 0; i < 32; i++) p2Tiles_[32 * k + i] = (uint16_t)(snes_.peek(src + 2 * i) | snes_.peek(src + 2 * i + 1) << 8);
     }
+  }
   playerPalette(roles_ ? 0 : 1, p2_[vix(0x00BB)], p2_[vix(0x057A)] != 0, p2Pal_);
   p2Drawn_ = true;
 }
@@ -1117,8 +1122,23 @@ void Smb3Engine::coopOam(Ppu& ppu) {
   // (Luigi in the game's slot: its sprites in his colours, whatever the game
   // loaded for its player, which it picks as Mario's)
   if (coop_ && roles_ && gameplay_) {
-    playerPalette(1, ram(0x00BB), ram(0x057A) != 0, slotPal_);
-    std::copy(slotPal_, slotPal_ + 16, ppu.objAlt2Colors);
+    if (nesSprites_ && hasNesRom_) {
+      int p1Suit = ram(0x00BB);
+      int p1Entry = 9 + std::min<int>(p1Suit, 6);
+      const uint8_t* suitData = nesPrg_.data() + 26 * 0x2000 + 0x56E;
+      if (ram(0x057A)) {
+        ppu.objAlt2Colors[1] = kNesPaletteBgr555[0x00];
+        ppu.objAlt2Colors[2] = kNesPaletteBgr555[0x10];
+        ppu.objAlt2Colors[3] = kNesPaletteBgr555[0x0F];
+      } else {
+        ppu.objAlt2Colors[1] = kNesPaletteBgr555[suitData[p1Entry * 4 + 1] & 0x3F];
+        ppu.objAlt2Colors[2] = kNesPaletteBgr555[suitData[p1Entry * 4 + 2] & 0x3F];
+        ppu.objAlt2Colors[3] = kNesPaletteBgr555[suitData[p1Entry * 4 + 3] & 0x3F];
+      }
+    } else {
+      playerPalette(1, ram(0x00BB), ram(0x057A) != 0, slotPal_);
+      std::copy(slotPal_, slotPal_ + 16, ppu.objAlt2Colors);
+    }
     for (int k = 0; k < kOamCount; k++) coopMask2_[(kOamFirst + k) >> 6] |= 1ull << ((kOamFirst + k) & 63);
   }
   // (The game leaves entries it doesn't use as they were: last frame's copy
@@ -1148,7 +1168,14 @@ void Smb3Engine::coopOam(Ppu& ppu) {
         std::memcpy(&usedBytes_[0], &w[0x0800 + 4 * t], 4);
         usedCount_ = 1;
         coopMask_[t >> 6] |= 1ull << (t & 63);
-        playerPalette(1, 0, false, ppu.objAltColors);
+        if (nesSprites_ && hasNesRom_) {
+          const uint8_t* suitData = nesPrg_.data() + 26 * 0x2000 + 0x56E;
+          ppu.objAltColors[1] = kNesPaletteBgr555[suitData[9 * 4 + 1] & 0x3F];
+          ppu.objAltColors[2] = kNesPaletteBgr555[suitData[9 * 4 + 2] & 0x3F];
+          ppu.objAltColors[3] = kNesPaletteBgr555[suitData[9 * 4 + 3] & 0x3F];
+        } else {
+          playerPalette(1, 0, false, ppu.objAltColors);
+        }
         break;
       }
       break;
@@ -1179,7 +1206,17 @@ void Smb3Engine::coopOam(Ppu& ppu) {
       coopMask_[t >> 6] |= 1ull << (t & 63);
       t--;
     }
-    playerPalette(roles_ ? 0 : 1, p2_[vix(0x00BB)], false, ppu.objAltColors);
+    if (nesSprites_ && hasNesRom_) {
+      int p2Suit = p2_[vix(0x00BB)];
+      int p2Char = roles_ ? 0 : 1;
+      int p2Entry = (p2Char == 0) ? std::min<int>(p2Suit, 6) : (9 + std::min<int>(p2Suit, 6));
+      const uint8_t* suitData = nesPrg_.data() + 26 * 0x2000 + 0x56E;
+      ppu.objAltColors[1] = kNesPaletteBgr555[suitData[p2Entry * 4 + 1] & 0x3F];
+      ppu.objAltColors[2] = kNesPaletteBgr555[suitData[p2Entry * 4 + 2] & 0x3F];
+      ppu.objAltColors[3] = kNesPaletteBgr555[suitData[p2Entry * 4 + 3] & 0x3F];
+    } else {
+      playerPalette(roles_ ? 0 : 1, p2_[vix(0x00BB)], false, ppu.objAltColors);
+    }
     return;
   }
   // (His last pose stays up on frames his update doesn't run: Mario hurt, the game frozen.)
@@ -1203,7 +1240,27 @@ void Smb3Engine::coopOam(Ppu& ppu) {
     put++;
     oamPut_++;
   }
-  std::copy(p2Pal_, p2Pal_ + 16, ppu.objAltColors);
+  if (nesSprites_ && hasNesRom_) {
+    int p2Suit = p2_.size() == (size_t)kVarCount ? p2_[vix(0x00BB)] : 0;
+    int p2Char = roles_ ? 0 : 1;
+    int p2Entry = (p2Char == 0) ? std::min<int>(p2Suit, 6) : (9 + std::min<int>(p2Suit, 6));
+    const uint8_t* suitData = nesPrg_.data() + 26 * 0x2000 + 0x56E;
+    bool isStatue = p2_.size() == (size_t)kVarCount && p2_[vix(0x057A)] != 0;
+    if (isStatue) {
+      ppu.objAltColors[1] = kNesPaletteBgr555[0x00];
+      ppu.objAltColors[2] = kNesPaletteBgr555[0x10];
+      ppu.objAltColors[3] = kNesPaletteBgr555[0x0F];
+    } else {
+      ppu.objAltColors[1] = kNesPaletteBgr555[suitData[p2Entry * 4 + 1] & 0x3F];
+      ppu.objAltColors[2] = kNesPaletteBgr555[suitData[p2Entry * 4 + 2] & 0x3F];
+      ppu.objAltColors[3] = kNesPaletteBgr555[suitData[p2Entry * 4 + 3] & 0x3F];
+    }
+    if (p2_.size() == (size_t)kVarCount) {
+      buildNesPlayerTiles(p2_[vix(0x00BB)], p2_[vix(0x00BC)], p2Tiles_);
+    }
+  } else {
+    std::copy(p2Pal_, p2Pal_ + 16, ppu.objAltColors);
+  }
   std::copy(p2Tiles_, p2Tiles_ + 192, ppu.objAltTiles);
   ppu.objAltTileBase = 0x6000;
   ppu.objAltTileWords = 192;

@@ -408,6 +408,7 @@ void SmasGame::titleDissolveMargins(uint32_t* frame) {
 // Character colour variants: recolour the sprite palette the player uses.
 void SmasGame::applyPlayerPalette(Ppu& ppu) {
   ppu.objPalOverrideMask = 0;
+  ppu.objVramOverride = nullptr;
   Smb1Engine* e = engine();
   if (e) e->setCharacterColours(playerPalette, luigiPalette);  // (co-op's other brother: see coopLine)
   // (the game's player: Mario's or Luigi's, whichever he is)
@@ -521,6 +522,22 @@ void SmasGame::setNesBrickBounce(bool on) {
     if (rom[0x7FA0 + i] != 0xFF && rom[0x7FA0 + i] != kRoutine[i]) return;
   for (size_t i = 0; i < 8; i++) rom[0x7FA0 + i] = on ? kRoutine[i] : 0xFF;
   for (size_t at : kSites) std::memcpy(&rom[at], on ? kCall : kOrig, 4);
+}
+
+bool SmasGame::loadSmb3NesRom(const std::vector<uint8_t>& nesRom) {
+  return smb3_ && smb3_->loadNesRom(nesRom);
+}
+
+bool SmasGame::hasSmb3NesRom() const {
+  return smb3_ && smb3_->hasNesRom();
+}
+
+void SmasGame::setNesSprites(bool on) {
+  if (smb3_) smb3_->setNesSprites(on);
+}
+
+bool SmasGame::nesSprites() const {
+  return smb3_ && smb3_->nesSprites();
 }
 
 void SmasGame::cancelWarps() {

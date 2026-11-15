@@ -54,6 +54,12 @@ public:
   // Mario back down, as on the NES (All-Stars keeps him rising). BMF54123's
   // brick fix, written into (or taken out of) the console's ROM.
   void setNesBrickBounce(bool on);
+  // Super Mario Bros. 3: optional NES ROM (smb3USARevA.nes / smb3.nes) to draw
+  // sprites and sprite palettes with the 8-bit NES graphics.
+  bool loadSmb3NesRom(const std::vector<uint8_t>& nesRom);
+  bool hasSmb3NesRom() const;
+  void setNesSprites(bool on);
+  bool nesSprites() const;
 
   // ---- identification
   GameId current() const { return game_; }

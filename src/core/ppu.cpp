@@ -643,10 +643,12 @@ void Ppu::renderObj(int row, int x0, int x1) {
       uint16_t adr = objBase_ + t * 16;
       if (tileBase & 0x100) adr += (objNameSel_ + 1) << 12;
       adr = (adr + fy) & 0x7fff;
-      uint16_t w0 = vram[adr], w1 = vram[(adr + 8) & 0x7fff];
+      const uint16_t* vr = (objVramOverride && adr >= 0x6000) ? (objVramOverride - 0x6000) : vram;
+      uint16_t a1 = (adr + 8) & 0x7fff;
+      const uint16_t* vr1 = (objVramOverride && a1 >= 0x6000) ? (objVramOverride - 0x6000) : vram;
+      uint16_t w0 = vr[adr], w1 = vr1[a1];
       if (alt && (uint16_t)(adr - objAltTileBase) < objAltTileWords) {
         w0 = objAltTiles[adr - objAltTileBase];
-        uint16_t a1 = (adr + 8) & 0x7fff;
         if ((uint16_t)(a1 - objAltTileBase) < objAltTileWords) w1 = objAltTiles[a1 - objAltTileBase];
       }
       for (int px = 0; px < 8; px++) {

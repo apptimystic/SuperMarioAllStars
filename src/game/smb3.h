@@ -12,6 +12,9 @@
 // (shared with SMB2).
 int parallaxAdjust(double speed, int cam, int shift);
 
+// Master 64-color NES palette converted to SNES BGR555 (15-bit).
+extern const uint16_t kNesPaletteBgr555[64];
+
 class Smb3Engine {
 public:
   explicit Smb3Engine(Snes& snes);
@@ -106,6 +109,13 @@ public:
   std::string takeMessage();  // warp result message for the UI (empty if none)
   std::string debug() const;
   std::string verifyLines();  // development self-check (smastool verifywide)
+  // NES SMB3 sprite & palette engine
+  bool loadNesRom(const std::vector<uint8_t>& nesRom);
+  bool hasNesRom() const { return hasNesRom_; }
+  void setNesSprites(bool on) { nesSprites_ = on; }
+  bool nesSprites() const { return nesSprites_; }
+  void buildNesPlayerTiles(uint8_t suit, uint8_t poseByte, uint16_t out192[192]) const;
+
   // Widescreen state kept in save states (see SmasGame::saveExt).
   void saveExt(std::vector<uint8_t>& out) const;
   bool loadExt(const uint8_t* p, size_t n, int version);
@@ -477,4 +487,12 @@ private:
   static const int kExtraCount;
  private:
   void openWorldTo(int number, int y, int xhi, int x);  // number: 1-10, 0 for a fortress
+
+  // NES sprite & palette engine private state
+  bool hasNesRom_ = false;
+  bool nesSprites_ = false;
+  std::vector<uint8_t> nesPrg_;
+  uint16_t nesChr_[128][1024] = {};
+  uint16_t nesObjVram_[0x2000] = {};
+  void updateNesSprites(Ppu& ppu);
 };

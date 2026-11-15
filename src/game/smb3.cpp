@@ -2338,6 +2338,10 @@ void Smb3Engine::beginLine(Ppu& ppu, int row) {
     hudFrame();  // (co-op's status bar: over what the game wrote in this vblank)
     boxFrame();
     cardFrame();
+    if (nesSprites_ && hasNesRom_ && (gameplay_ || mapScreen() || mapLeaving())) {
+      updateNesSprites(ppu);
+      ppu.objVramOverride = nesObjVram_;
+    }
   }
   // The toad house keeps its own shape, black either side of it (its black
   // is the picture's own; the backdrop colour is not).
@@ -3794,3 +3798,353 @@ std::string Smb3Engine::debug() const {
   if (coop_) out += "\n  coop: " + coopDebug();
   return out;
 }
+
+// ----------------------------------------------------------------------------
+// NES SMB3 Sprite & Palette Engine
+// ----------------------------------------------------------------------------
+
+const uint16_t kNesPaletteBgr555[64] = {
+  0x318c, 0x44a0, 0x5042, 0x5007, 0x3c0b, 0x200d, 0x000d, 0x006b,
+  0x00c6, 0x0122, 0x0140, 0x0520, 0x2500, 0x0000, 0x0000, 0x0000,
+  0x56b5, 0x6d62, 0x7d08, 0x7c8e, 0x6475, 0x3878, 0x00d7, 0x0134,
+  0x01ae, 0x0208, 0x0242, 0x1620, 0x45e0, 0x0000, 0x0000, 0x0000,
+  0x7fff, 0x7ecc, 0x7e52, 0x7dd8, 0x7dbf, 0x61bf, 0x25ff, 0x027e,
+  0x02f8, 0x0352, 0x038c, 0x2768, 0x5b28, 0x2529, 0x0000, 0x0000,
+  0x7fff, 0x7f96, 0x7f59, 0x7f1c, 0x7f1f, 0x771f, 0x5b3f, 0x477f,
+  0x439c, 0x43d9, 0x47d7, 0x5bd5, 0x6fb4, 0x5ef7, 0x0000, 0x0000,
+};
+
+bool Smb3Engine::loadNesRom(const std::vector<uint8_t>& nesRom) {
+  const uint8_t* prg = nullptr;
+  const uint8_t* chr = nullptr;
+  if (nesRom.size() >= 16 + 0x40000 + 0x20000 &&
+      nesRom[0] == 'N' && nesRom[1] == 'E' && nesRom[2] == 'S' && nesRom[3] == 0x1A &&
+      nesRom[4] == 16 && nesRom[5] == 16) {
+    prg = nesRom.data() + 16;
+    chr = nesRom.data() + 16 + 0x40000;
+  } else if (nesRom.size() == 0x60000) {
+    prg = nesRom.data();
+    chr = nesRom.data() + 0x40000;
+  } else {
+    return false;
+  }
+
+  nesPrg_.assign(prg, prg + 0x40000);
+  for (int b = 0; b < 128; b++) {
+    for (int t = 0; t < 64; t++) {
+      const uint8_t* raw = chr + b * 1024 + t * 16;
+      for (int r = 0; r < 8; r++) {
+        uint8_t bp0 = raw[r];
+        uint8_t bp1 = raw[r + 8];
+        nesChr_[b][t * 16 + r] = uint16_t(bp0) | (uint16_t(bp1) << 8);
+        nesChr_[b][t * 16 + 8 + r] = 0;
+      }
+    }
+  }
+  hasNesRom_ = true;
+  return true;
+}
+
+void Smb3Engine::buildNesPlayerTiles(uint8_t suitByte, uint8_t poseByte, uint16_t out192[192]) const {
+  if (!hasNesRom_ || nesPrg_.size() < 0x40000) return;
+  const uint8_t* poseTable = nesPrg_.data() + 0x3AC51;
+  const uint8_t* groupOffset = nesPrg_.data() + 0x3AE37;
+  const uint8_t* suitBase = nesPrg_.data() + 0x3AE98;
+  int poseIdx = poseByte >> 1;
+  if (poseIdx >= 81) poseIdx = 39;
+  int suit = std::min<int>(suitByte, 6);
+  int bank1K = suitBase[suit] + groupOffset[poseIdx];
+  for (int k = 0; k < 6; k++) {
+    uint8_t t = poseTable[poseIdx * 6 + k];
+    if (t == 0xF1) {
+      std::fill_n(&out192[k * 32], 32, 0);
+    } else if ((poseIdx == 24 || poseIdx == 25 || poseIdx == 67 || poseIdx == 68) && (t >= 0xA8 && t <= 0xAF)) {
+      int t0 = t & 0x3E;
+      std::copy_n(&nesChr_[0x59][t0 * 16], 16, &out192[k * 32]);
+      std::copy_n(&nesChr_[0x59][(t0 + 1) * 16], 16, &out192[k * 32 + 16]);
+    } else {
+      int t0 = (t & 0xFE) & 0x3E;
+      std::copy_n(&nesChr_[bank1K][t0 * 16], 16, &out192[k * 32]);
+      std::copy_n(&nesChr_[bank1K][(t0 + 1) * 16], 16, &out192[k * 32 + 16]);
+    }
+  }
+}
+
+void Smb3Engine::updateNesSprites(Ppu& ppu) {
+  if (!hasNesRom_ || nesPrg_.size() < 0x40000) return;
+
+  // 1. Palettes
+  int p1Char = (ram(0x0726) & 1) ^ (roles_ ? 1 : 0);
+  int p1Suit = std::min<int>(ram(0x00ED) < 7 ? ram(0x00ED) : ram(0x00BB), 6);
+  int p1Entry = (p1Char == 0) ? p1Suit : (9 + p1Suit);
+  const uint8_t* suitData = nesPrg_.data() + 26 * 0x2000 + 0x56E;
+  if (ram(0x057A)) {
+    ppu.objPalOverride[0][1] = kNesPaletteBgr555[0x00];
+    ppu.objPalOverride[0][2] = kNesPaletteBgr555[0x10];
+    ppu.objPalOverride[0][3] = kNesPaletteBgr555[0x0F];
+  } else {
+    ppu.objPalOverride[0][1] = kNesPaletteBgr555[suitData[p1Entry * 4 + 1] & 0x3F];
+    ppu.objPalOverride[0][2] = kNesPaletteBgr555[suitData[p1Entry * 4 + 2] & 0x3F];
+    ppu.objPalOverride[0][3] = kNesPaletteBgr555[suitData[p1Entry * 4 + 3] & 0x3F];
+  }
+
+  int ts = (mapScreen() || mapLeaving()) ? 0 : ram(0x070A);
+  if (ts < 0 || ts > 18) ts = 1;
+  uint16_t ptr = nesPrg_[0x377D2 + 2 * ts] | (nesPrg_[0x377D2 + 2 * ts + 1] << 8);
+  uint32_t offsetInBank27 = ptr - 0xA000;
+  const uint8_t* objPalData = nesPrg_.data() + 27 * 0x2000 + offsetInBank27 + 16;
+  for (int p = 1; p <= 3; p++) {
+    const uint8_t* nesColors = objPalData + p * 4;
+    ppu.objPalOverride[p][1] = kNesPaletteBgr555[nesColors[1] & 0x3F];
+    ppu.objPalOverride[p][2] = kNesPaletteBgr555[nesColors[2] & 0x3F];
+    ppu.objPalOverride[p][3] = kNesPaletteBgr555[nesColors[3] & 0x3F];
+  }
+  // SMAS OBJ palette mapping:
+  // Palette 0 & 7: Player 1 (Mario / Luigi)
+  // Palette 1 & 5: Enemy 1
+  // Palette 2 & 6: Enemy 2
+  // Palette 3 & 4: Enemy 3
+  ppu.objPalOverride[5][1] = ppu.objPalOverride[1][1];
+  ppu.objPalOverride[5][2] = ppu.objPalOverride[1][2];
+  ppu.objPalOverride[5][3] = ppu.objPalOverride[1][3];
+
+  ppu.objPalOverride[6][1] = ppu.objPalOverride[2][1];
+  ppu.objPalOverride[6][2] = ppu.objPalOverride[2][2];
+  ppu.objPalOverride[6][3] = ppu.objPalOverride[2][3];
+
+  ppu.objPalOverride[4][1] = ppu.objPalOverride[3][1];
+  ppu.objPalOverride[4][2] = ppu.objPalOverride[3][2];
+  ppu.objPalOverride[4][3] = ppu.objPalOverride[3][3];
+
+  if (ram(0x057A)) {
+    ppu.objPalOverride[0][1] = ppu.objPalOverride[7][1] = kNesPaletteBgr555[0x00];
+    ppu.objPalOverride[0][2] = ppu.objPalOverride[7][2] = kNesPaletteBgr555[0x10];
+    ppu.objPalOverride[0][3] = ppu.objPalOverride[7][3] = kNesPaletteBgr555[0x0F];
+  } else {
+    ppu.objPalOverride[0][1] = ppu.objPalOverride[7][1] = kNesPaletteBgr555[suitData[p1Entry * 4 + 1] & 0x3F];
+    ppu.objPalOverride[0][2] = ppu.objPalOverride[7][2] = kNesPaletteBgr555[suitData[p1Entry * 4 + 2] & 0x3F];
+    ppu.objPalOverride[0][3] = ppu.objPalOverride[7][3] = kNesPaletteBgr555[suitData[p1Entry * 4 + 3] & 0x3F];
+  }
+  ppu.objPalOverrideMask = 0xFF;
+
+  // 2. Sprite VRAM
+  if (mapScreen() || mapLeaving()) {
+    // Copy native VRAM first
+    const uint16_t* vram = ppu.vram;
+    std::copy_n(&vram[0x6000], 0x2000, nesObjVram_);
+
+    // Overwrite the 48 16x16 map objects
+    const uint8_t* nes_left = nesPrg_.data() + 11 * 0x2000 + 0x146C;
+    const uint8_t* nes_right = nesPrg_.data() + 11 * 0x2000 + 0x149C;
+    for (int i = 0; i < 48; i++) {
+      uint8_t st = snes_.peek(0x21E80F + i);
+      if (!st) continue;
+      uint8_t nl = nes_left[i];
+      uint8_t nr = nes_right[i];
+      int base1k_L = (nl & 1) ? 0x22 : 0x20;
+      int bank_L = base1k_L + ((nl & 0xFE) >> 6);
+      int t_L = (nl & 0xFE) & 0x3E;
+      int base1k_R = (nr & 1) ? 0x22 : 0x20;
+      int bank_R = base1k_R + ((nr & 0xFE) >> 6);
+      int t_R = (nr & 0xFE) & 0x3E;
+      std::copy_n(&nesChr_[bank_L][t_L * 16], 16, &nesObjVram_[st * 16]);
+      std::copy_n(&nesChr_[bank_L][(t_L + 1) * 16], 16, &nesObjVram_[(st + 0x10) * 16]);
+      std::copy_n(&nesChr_[bank_R][t_R * 16], 16, &nesObjVram_[(st + 1) * 16]);
+      std::copy_n(&nesChr_[bank_R][(t_R + 1) * 16], 16, &nesObjVram_[(st + 0x11) * 16]);
+    }
+
+    // Mario World Map icon at 0x20 and 0x22
+    int player = ram(0x0726) & 1;
+    int mapSuit = std::min<int>(ram(0x0747 + player), 6);
+    auto get8x16 = [](uint8_t t, int& bank, int& tile) {
+      int base1k = (t & 1) ? 0x22 : 0x20;
+      bank = base1k + ((t & 0xFE) >> 6);
+      tile = (t & 0xFE) & 0x3E;
+    };
+    uint8_t tL0 = 0x45, tR0 = 0x47, tL1 = 0x45, tR1 = 0x47;
+    if (mapSuit == 0) {
+      tL0 = 0x59; tR0 = 0x51; tL1 = 0x5D; tR1 = 0x55;
+    } else if (mapSuit == 1 || mapSuit == 2) {
+      tL0 = 0x45; tR0 = 0x47; tL1 = 0x45; tR1 = 0x47;
+    } else if (mapSuit == 3) {
+      tL0 = 0x49; tR0 = 0x31; tL1 = 0x49; tR1 = 0x31;
+    } else if (mapSuit == 4) {
+      tL0 = 0x49; tR0 = 0x35; tL1 = 0x49; tR1 = 0x35;
+    } else if (mapSuit == 5) {
+      tL0 = 0x49; tR0 = 0x39; tL1 = 0x49; tR1 = 0x39;
+    } else if (mapSuit == 6) {
+      tL0 = 0x49; tR0 = 0x41; tL1 = 0x49; tR1 = 0x41;
+    }
+    int bL, iL, bR, iR;
+    get8x16(tL0, bL, iL); get8x16(tR0, bR, iR);
+    std::copy_n(&nesChr_[bL][iL * 16], 16, &nesObjVram_[0x20 * 16]);
+    std::copy_n(&nesChr_[bL][(iL + 1) * 16], 16, &nesObjVram_[0x30 * 16]);
+    std::copy_n(&nesChr_[bR][iR * 16], 16, &nesObjVram_[0x21 * 16]);
+    std::copy_n(&nesChr_[bR][(iR + 1) * 16], 16, &nesObjVram_[0x31 * 16]);
+
+    get8x16(tL1, bL, iL); get8x16(tR1, bR, iR);
+    std::copy_n(&nesChr_[bL][iL * 16], 16, &nesObjVram_[0x22 * 16]);
+    std::copy_n(&nesChr_[bL][(iL + 1) * 16], 16, &nesObjVram_[0x32 * 16]);
+    std::copy_n(&nesChr_[bR][iR * 16], 16, &nesObjVram_[0x23 * 16]);
+    std::copy_n(&nesChr_[bR][(iR + 1) * 16], 16, &nesObjVram_[0x33 * 16]);
+  } else {
+    // Gameplay
+    // 1. Player 1
+    uint8_t p1SuitVal = ram(0x00ED) < 7 ? ram(0x00ED) : ram(0x00BB);
+    buildNesPlayerTiles(p1SuitVal, ram(0x00BC), &nesObjVram_[0]);
+    if (ram(0x0577)) {
+      std::copy_n(&nesChr_[0x59][0x28 * 16], 6 * 16, &nesObjVram_[0x1000 + 0x28 * 16]);
+    }
+
+    // 2. Animated coin/question block DMA ($60C0..$60FF)
+    int k = ram(0x02B2) & 3;
+    static const uint8_t coinTiles[4] = {0x30, 0x34, 0x3C, 0x38};
+    std::copy_n(&nesChr_[0x1B][coinTiles[k] * 16], 4 * 16, &nesObjVram_[0x0C * 16]);
+
+    // 3. Fixed common level sprites in Slot 0 ($6000..$63FF)
+    std::copy_n(&nesChr_[0x0B][0x18 * 16], 2 * 16, &nesObjVram_[0x18 * 16]);
+    std::copy_n(&nesChr_[0x0B][0x1C * 16], 4 * 16, &nesObjVram_[0x1C * 16]);
+    std::copy_n(&nesChr_[0x0E][0x20 * 16], 14 * 16, &nesObjVram_[0x20 * 16]);
+    std::copy_n(&nesChr_[0x0B][0x38 * 16], 2 * 16, &nesObjVram_[0x2E * 16]);
+    std::copy_n(&nesChr_[0x0E][0x30 * 16], 2 * 16, &nesObjVram_[0x30 * 16]);
+    std::copy_n(&nesChr_[0x07][0x32 * 16], 2 * 16, &nesObjVram_[0x32 * 16]);
+    std::copy_n(&nesChr_[0x0E][0x34 * 16], 4 * 16, &nesObjVram_[0x34 * 16]);
+    std::copy_n(&nesChr_[0x0B][0x38 * 16], 4 * 16, &nesObjVram_[0x38 * 16]);
+    std::copy_n(&nesChr_[0x07][0x3C * 16], 4 * 16, &nesObjVram_[0x3C * 16]);
+
+    // 4. Slot 7 (goal cards and common sprites, $7C00..$7FFF)
+    uint16_t* s7 = &nesObjVram_[0x1C00];
+    std::copy_n(&nesChr_[0x05][0x20 * 16], 20 * 16, &s7[0x00 * 16]);
+    std::copy_n(&nesChr_[0x4F][0x34 * 16], 4 * 16, &s7[0x14 * 16]);
+    std::copy_n(&nesChr_[0x36][0x08 * 16], 4 * 16, &s7[0x18 * 16]);
+    std::copy_n(&nesChr_[0x36][0x0C * 16], 4 * 16, &s7[0x1C * 16]);
+    std::copy_n(&nesChr_[0x36][0x10 * 16], 10 * 16, &s7[0x20 * 16]);
+    std::copy_n(&nesChr_[0x36][0x32 * 16], 4 * 16, &s7[0x2A * 16]);
+    std::copy_n(&nesChr_[0x36][0x20 * 16], 6 * 16, &s7[0x2E * 16]);
+    std::copy_n(&nesChr_[0x36][0x00 * 16], 8 * 16, &s7[0x34 * 16]);
+    std::copy_n(&nesChr_[0x4F][0x0C * 16], 4 * 16, &s7[0x3C * 16]);
+
+    // 5. Slots 1..6
+    int lts = ram(0x1EBF);
+    if (lts < 0 || lts >= 48) lts = 0;
+    for (int slot = 1; slot <= 6; slot++) {
+      uint8_t bank = 0;
+      uint16_t addr = 0;
+      if (slot == 1) {
+        bank = snes_.peek(0x20A969 + lts);
+        addr = snes_.peek(0x20A909 + lts * 2) | (snes_.peek(0x20A909 + lts * 2 + 1) << 8);
+      } else if (slot == 2) {
+        bank = snes_.peek(0x20A9F9 + lts);
+        addr = snes_.peek(0x20A999 + lts * 2) | (snes_.peek(0x20A999 + lts * 2 + 1) << 8);
+      } else if (slot == 3) {
+        bank = snes_.peek(0x20AA89 + lts);
+        addr = snes_.peek(0x20AA29 + lts * 2) | (snes_.peek(0x20AA29 + lts * 2 + 1) << 8);
+      } else if (slot == 4) {
+        bank = snes_.peek(0x20AB19 + lts);
+        addr = snes_.peek(0x20AAB9 + lts * 2) | (snes_.peek(0x20AAB9 + lts * 2 + 1) << 8);
+      } else if (slot == 5) {
+        if (lts == 0x0A) {
+          int world = ram(0x0727) & 7;
+          bank = snes_.peek(0x20AC69 + world);
+          addr = snes_.peek(0x20AC71 + world * 2) | (snes_.peek(0x20AC71 + world * 2 + 1) << 8);
+        } else {
+          bank = snes_.peek(0x20ABA9 + lts);
+          addr = snes_.peek(0x20AB49 + lts * 2) | (snes_.peek(0x20AB49 + lts * 2 + 1) << 8);
+        }
+      } else if (slot == 6) {
+        bank = snes_.peek(0x20AC39 + lts);
+        addr = snes_.peek(0x20ABD9 + lts * 2) | (snes_.peek(0x20ABD9 + lts * 2 + 1) << 8);
+      }
+
+      uint16_t* slotDest = &nesObjVram_[slot * 0x400];
+      if (bank == 0x30 && addr == 0x8000) {
+        if (lts == 0x0A) {
+          std::copy_n(&nesChr_[0x4B][0], 1024, slotDest);
+          std::fill_n(&slotDest[0x3E * 16], 2 * 16, 0);
+        } else {
+          std::copy_n(&nesChr_[0x37][0], 1024, slotDest);
+          std::copy_n(&nesChr_[0x36][0x34 * 16], 2 * 16, &slotDest[0x08 * 16]);
+          std::copy_n(&nesChr_[0x36][0x3C * 16], 4 * 16, &slotDest[0x1C * 16]);
+        }
+      } else if (bank == 0x30 && addr == 0x8800) {
+        std::copy_n(&nesChr_[0x37][0], 1024, slotDest);
+        std::copy_n(&nesChr_[0x48][0x30 * 16], 10 * 16, &slotDest[0x30 * 16]);
+      } else if (bank == 0x30 && addr == 0x9000) {
+        std::copy_n(&nesChr_[0x37][0], 1024, slotDest);
+        std::copy_n(&nesChr_[0x36][0x0A * 16], 12 * 16, &slotDest[0x0A * 16]);
+        std::copy_n(&nesChr_[0x36][0x18 * 16], 4 * 16, &slotDest[0x18 * 16]);
+        std::copy_n(&nesChr_[0x4F][0x3C * 16], 4 * 16, &slotDest[0x3C * 16]);
+      } else if (bank == 0x30 && addr == 0x9800) {
+        std::copy_n(&nesChr_[0x0E][0], 1024, slotDest);
+        std::copy_n(&nesChr_[0x0A][0x10 * 16], 4 * 16, &slotDest[0x10 * 16]);
+        std::copy_n(&nesChr_[0x0A][0x1A * 16], 6 * 16, &slotDest[0x1A * 16]);
+        std::copy_n(&nesChr_[0x32][0x10 * 16], 12 * 16, &slotDest[0x30 * 16]);
+      } else if (bank == 0x34 && (addr == 0x8000 || addr == 0x8800 || addr == 0x9000 || addr == 0x9800)) {
+        int w = std::min<int>(ram(0x0727) & 7, 6);
+        static const uint8_t koopBanks[7] = {0x48, 0x48, 0x49, 0x48, 0x49, 0x4A, 0x4A};
+        int kBank = koopBanks[w];
+        for (int k = 0; k < 30; k++) {
+          uint8_t st = snes_.peek(0x21B9AE + w * 30 + k);
+          uint8_t nt = nesPrg_[1 * 0x2000 + 0x11E7 + w * 30 + k];
+          if (nt != 0xFF && nt != 0x71 && nt != 0) {
+            int sTile = st & 0x3E;
+            int nTile = nt & 0x3E;
+            std::copy_n(&nesChr_[kBank][nTile * 16], 32, &slotDest[sTile * 16]);
+          }
+        }
+        std::copy_n(&nesChr_[0x48][0x30 * 16], 10 * 16, &slotDest[0x30 * 16]);
+      } else if (bank == 0x34 && addr == 0xA000) {
+        std::copy_n(&nesChr_[0x1A][0], 1024, slotDest);
+        std::copy_n(&nesChr_[0x36][0x3A * 16], 6 * 16, &slotDest[0x30 * 16]);
+        std::copy_n(&nesChr_[0x36][0x1C * 16], 2 * 16, &slotDest[0x36 * 16]);
+      } else if (bank == 0x35 && addr == 0x8000) {
+        std::copy_n(&nesChr_[0x4D][0], 1024, slotDest);
+        std::copy_n(&nesChr_[0x13][0x3C * 16], 4 * 16, &slotDest[0x3C * 16]);
+      } else if (bank == 0x35 && addr == 0x8800) {
+        std::copy_n(&nesChr_[0x33][0], 1024, slotDest);
+        std::fill_n(&slotDest[0x38 * 16], 2 * 16, 0);
+      } else if (bank == 0x35 && addr == 0x9000) {
+        std::copy_n(&nesChr_[0x13][0], 1024, slotDest);
+        std::copy_n(&nesChr_[0x13][0x12 * 16], 2 * 16, &slotDest[0x04 * 16]);
+      } else if (bank == 0x35 && addr == 0x9800) {
+        std::copy_n(&nesChr_[0x4F][0], 1024, slotDest);
+      } else if (bank == 0x35 && addr == 0xA000) {
+        std::copy_n(&nesChr_[0x54][0], 1024, slotDest);
+      } else if (bank == 0x35 && addr == 0xA800) {
+        std::copy_n(&nesChr_[0x55][0], 1024, slotDest);
+      } else {
+        int idx = (bank - 0x30) * 16 + ((addr - 0x8000) >> 11);
+        if (idx >= 0 && idx < 128) {
+          std::copy_n(&nesChr_[idx][0], 1024, slotDest);
+        }
+      }
+    }
+
+    // 6. Fortress Boom Boom (tileset 2)
+    if (ram(0x070A) == 2) {
+      for (int r = 0; r < 9; r++) {
+        for (int c = 0; c < 6; c++) {
+          uint8_t s = snes_.peek(0x21C8ED + r * 6 + c);
+          uint8_t nl = nesPrg_[1 * 0x2000 + 0x1CA1 + r * 16 + c * 2];
+          uint8_t nr = nesPrg_[1 * 0x2000 + 0x1CA1 + r * 16 + c * 2 + 1];
+          int S = 0x100 | s;
+          if (S + 0x11 < 0x200) {
+            if (nl != 0 && nl != 0x71 && nl != 0xF1 && nl != 0xFF) {
+              int b = (nl < 0xC0) ? 0x3A : 0x3B;
+              int t = (nl & 0xFE) & 0x3E;
+              std::copy_n(&nesChr_[b][t * 16], 16, &nesObjVram_[S * 16]);
+              std::copy_n(&nesChr_[b][(t + 1) * 16], 16, &nesObjVram_[(S + 0x10) * 16]);
+            }
+            if (nr != 0 && nr != 0x71 && nr != 0xF1 && nr != 0xFF) {
+              int b = (nr < 0xC0) ? 0x3A : 0x3B;
+              int t = (nr & 0xFE) & 0x3E;
+              std::copy_n(&nesChr_[b][t * 16], 16, &nesObjVram_[(S + 1) * 16]);
+              std::copy_n(&nesChr_[b][(t + 1) * 16], 16, &nesObjVram_[(S + 0x11) * 16]);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+

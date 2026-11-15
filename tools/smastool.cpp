@@ -810,6 +810,17 @@ static void execLine(const std::string& line) {
     printf("HASH %s %08x\n", name.c_str(), h);
   } else if (cmd == "game") {
     printf("%s\n", g_game->describe().c_str());
+  } else if (cmd == "nesrom") {
+    std::string p;
+    ss >> p;
+    auto nr = readFile(p);
+    bool ok = g_game->loadSmb3NesRom(nr);
+    printf("nesrom %s: %s\n", p.c_str(), ok ? "ok" : "failed");
+  } else if (cmd == "nessprites") {
+    int on = 1;
+    ss >> on;
+    g_game->setNesSprites(on != 0);
+    printf("nessprites=%d (hasRom=%d)\n", g_game->nesSprites() ? 1 : 0, g_game->hasSmb3NesRom() ? 1 : 0);
   } else if (cmd == "echo") {
     std::string rest;
     std::getline(ss, rest);
@@ -836,6 +847,11 @@ int main(int argc, char** argv) {
   static SmasGame game(snes);
   g_game = &game;
   game.install();
+  {
+    auto nr = readFile("smb3USARevA.nes");
+    if (nr.empty()) nr = readFile("smb3.nes");
+    if (!nr.empty()) game.loadSmb3NesRom(nr);
+  }
   snes.reset(true);
 
   std::string script;

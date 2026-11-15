@@ -3,6 +3,8 @@
 *.smc
 *.swc
 *.fig
+*.nes
+.DS_Store
 roms/
 *.zip
 *.7z

@@ -103,6 +103,41 @@ bool App::loadRom() {
   romData = std::move(data);
   game = std::make_unique<SmasGame>(*snes);
   game->install();
+  // Look for an optional NES Super Mario Bros. 3 ROM (smb3USARevA.nes / smb3.nes)
+  // next to the SNES ROM, next to the executable, or in the working folder.
+  {
+    auto tryNesDir = [&](const std::wstring& dir) -> bool {
+      if (dir.empty()) return false;
+      static const wchar_t* const kNames[] = {
+          L"smb3USARevA.nes", L"smb3.nes", L"Super Mario Bros. 3 (USA) (Rev 1).nes",
+          L"Super Mario Bros. 3 (USA).nes", L"Super Mario Bros. 3.nes"};
+      std::vector<uint8_t> nd;
+      for (const wchar_t* nm : kNames) {
+        std::wstring np = pathJoin(dir, nm);
+        if (readAll(np, nd) && game->loadSmb3NesRom(nd)) {
+          logf("SMB3 NES ROM loaded: %s", narrow(np).c_str());
+          return true;
+        }
+      }
+      std::error_code ec;
+      for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(dir), ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        std::wstring ext = entry.path().extension().wstring();
+        for (wchar_t& ch : ext) ch = (wchar_t)std::tolower(ch);
+        if (ext != L".nes") continue;
+        std::wstring np = entry.path().wstring();
+        if (readAll(np, nd) && game->loadSmb3NesRom(nd)) {
+          logf("SMB3 NES ROM loaded: %s", narrow(np).c_str());
+          return true;
+        }
+      }
+      return false;
+    };
+    if (!tryNesDir(pathDir(romPath)) && !tryNesDir(exeDir)) {
+      std::error_code ec;
+      tryNesDir(std::filesystem::current_path(ec).wstring());
+    }
+  }
   snes->reset(true);
   loadSram();
   return true;
@@ -497,6 +532,7 @@ void App::applyConfig() {
     game->dimWrap = cfg.dimWrap;
     game->enemyRange = cfg.widescreenEnemies != 0;
     game->setNesBrickBounce(cfg.nesBrickBounce);
+    game->setNesSprites(cfg.nesSprites);
     game->coop = cfg.coop;
     game->setCheats(achLocked() ? 0 : cfg.cheats);  // (achievements on: no cheats)
     game->playerPalette = cfg.playerPalette;
@@ -1018,6 +1054,22 @@ std::shared_ptr<MenuPage> App::pageOptions() {
         },
         "Super Mario Bros. and The Lost Levels: breaking a brick from below sends Mario back down, as on the NES. "
         "Off: he keeps rising, as in the original All-Stars. (BMF54123's brick fix.)"));
+    {
+      MenuItem ns = MenuItem::toggle(
+          "NES Sprites (SMB3)", [this]() { return cfg.nesSprites && game && game->hasSmb3NesRom() ? 1 : 0; },
+          [this](int v) {
+            cfg.nesSprites = v != 0;
+            applyConfig();
+          },
+          "Super Mario Bros. 3: draw Mario, Luigi, enemies, items, bosses and world map icons with the 8-bit NES "
+          "sprites and palettes from an NES Super Mario Bros. 3 ROM (smb3.nes or smb3USARevA.nes next to the ROM), "
+          "keeping the 16-bit All-Stars backgrounds.");
+      ns.enabled = [this]() { return game && game->hasSmb3NesRom(); };
+      ns.valueText = [this]() {
+        return std::string(game && game->hasSmb3NesRom() ? "" : "Needs smb3.nes");
+      };
+      pg.items.push_back(ns);
+    }
     pg.items.push_back(MenuItem::header("Multiplayer"));
     pg.items.push_back(MenuItem::toggle(
         "Two-Player Co-op", [this]() { return cfg.coop ? 1 : 0; },
